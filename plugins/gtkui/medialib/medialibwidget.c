@@ -52,6 +52,7 @@ typedef struct {
     dispatch_queue_t background_queue;
 
     int show_album_art;
+    int show_track_art;
 } w_medialib_viewer_t;
 
 enum {
@@ -432,10 +433,16 @@ w_medialib_viewer_message (ddb_gtkui_widget_t *w, uint32_t id, uintptr_t ctx, ui
     case DB_EV_CONFIGCHANGED:
         {
             int new_value = deadbeef->conf_get_int ("gtkui.show_medialib_covers", 1);
+            int new_track_art = deadbeef->conf_get_int ("gtkui.show_medialib_track_covers", 0);
             gtkui_dispatch_on_main (^{
                 if (new_value != mlv->show_album_art) {
                     mlv->show_album_art = new_value;
                     _setup_columns (mlv);
+                }
+                if (new_track_art != mlv->show_track_art) {
+                    mlv->show_track_art = new_track_art;
+                    // reload to drop or request the track thumbnails
+                    _medialib_content_did_change (mlv);
                 }
             });
         }
@@ -788,16 +795,18 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
 
     GtkTreeIter iter;
     gtk_tree_model_get_iter (model, &iter, path);
-    if (!gtk_tree_model_iter_has_child (model, &iter)) {
+    gboolean is_folder = gtk_tree_model_iter_has_child (model, &iter);
+    if (is_folder) {
+        // get first child
+        GtkTreePath *child_path = gtk_tree_path_copy (path);
+        gtk_tree_path_append_index (child_path, 0);
+        gtk_tree_model_get_iter (model, &iter, child_path);
+        gtk_tree_path_free (child_path);
+        child_path = NULL;
+    }
+    else if (!mlv->show_track_art) {
         return NULL; // leaf
     }
-
-    // get first child
-    GtkTreePath *child_path = gtk_tree_path_copy (path);
-    gtk_tree_path_append_index (child_path, 0);
-    gtk_tree_model_get_iter (model, &iter, child_path);
-    gtk_tree_path_free (child_path);
-    child_path = NULL;
 
     GValue value = { 0 };
     gtk_tree_model_get_value (model, &iter, COL_TRACK, &value);
@@ -805,11 +814,11 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
     g_value_unset (&value);
 
     if (track == NULL) {
-        return mlv->folder_icon;
+        return is_folder ? mlv->folder_icon : NULL;
     }
 
     if (mlv->artwork_source_id == 0) {
-        return mlv->folder_icon;
+        return is_folder ? mlv->folder_icon : NULL;
     }
 
     int64_t reload_index = mlv->reload_index;
@@ -826,7 +835,7 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
     if (cached_cover != NULL) {
         _receive_cover (mlv, path, cached_cover);
     }
-    return mlv->folder_icon;
+    return is_folder ? mlv->folder_icon : NULL;
 }
 
 static void
@@ -864,6 +873,7 @@ w_medialib_viewer_create (void) {
     w->base.message = w_medialib_viewer_message;
 
     w->show_album_art = deadbeef->conf_get_int ("gtkui.show_medialib_covers", 1);
+    w->show_track_art = deadbeef->conf_get_int ("gtkui.show_medialib_track_covers", 0);
 
     gtk_widget_set_can_focus (w->base.widget, FALSE);
 
