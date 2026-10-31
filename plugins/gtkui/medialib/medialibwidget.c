@@ -28,6 +28,24 @@
 extern DB_functions_t *deadbeef;
 static DB_mediasource_t *plugin;
 
+// values of the gtkui.show_medialib_covers setting
+enum {
+    MEDIALIB_ART_NONE = 0,
+    MEDIALIB_ART_FOLDERS = 1,
+    MEDIALIB_ART_TRACKS = 2,
+    MEDIALIB_ART_FOLDERS_AND_TRACKS = 3,
+};
+
+static int
+_art_mode_shows_folders (int mode) {
+    return mode == MEDIALIB_ART_FOLDERS || mode == MEDIALIB_ART_FOLDERS_AND_TRACKS;
+}
+
+static int
+_art_mode_shows_tracks (int mode) {
+    return mode == MEDIALIB_ART_TRACKS || mode == MEDIALIB_ART_FOLDERS_AND_TRACKS;
+}
+
 typedef struct {
     ddb_gtkui_widget_t base;
     gtkScriptableSelectViewController_t *selectViewController;
@@ -51,7 +69,7 @@ typedef struct {
     int64_t artwork_source_id;
     dispatch_queue_t background_queue;
 
-    int show_album_art;
+    int art_mode;
 } w_medialib_viewer_t;
 
 enum {
@@ -434,11 +452,13 @@ w_medialib_viewer_message (ddb_gtkui_widget_t *w, uint32_t id, uintptr_t ctx, ui
     switch (id) {
     case DB_EV_CONFIGCHANGED:
         {
-            int new_value = deadbeef->conf_get_int ("gtkui.show_medialib_covers", 1);
+            int new_value = deadbeef->conf_get_int ("gtkui.show_medialib_covers", MEDIALIB_ART_FOLDERS);
             gtkui_dispatch_on_main (^{
-                if (new_value != mlv->show_album_art) {
-                    mlv->show_album_art = new_value;
+                if (new_value != mlv->art_mode) {
+                    mlv->art_mode = new_value;
                     _setup_columns (mlv);
+                    // Drop the loaded thumbnails, the visible cells request the ones for the new mode again
+                    _covermanager_did_reset (mlv);
                 }
             });
         }
@@ -827,17 +847,27 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
     GtkTreeModel *model = GTK_TREE_MODEL (mlv->store);
 
     GtkTreeIter iter;
-    if (!gtk_tree_model_get_iter (model, &iter, path) || !gtk_tree_model_iter_has_child (model, &iter)) {
+    if (!gtk_tree_model_get_iter (model, &iter, path)) {
+        gtk_tree_path_free (path);
+        return NULL;
+    }
+    gboolean is_folder = gtk_tree_model_iter_has_child (model, &iter);
+    if (is_folder) {
+        if (!_art_mode_shows_folders (mlv->art_mode)) {
+            gtk_tree_path_free (path);
+            return mlv->folder_icon;
+        }
+        // get first child
+        GtkTreePath *child_path = gtk_tree_path_copy (path);
+        gtk_tree_path_append_index (child_path, 0);
+        gtk_tree_model_get_iter (model, &iter, child_path);
+        gtk_tree_path_free (child_path);
+        child_path = NULL;
+    }
+    else if (!_art_mode_shows_tracks (mlv->art_mode)) {
         gtk_tree_path_free (path);
         return NULL; // leaf
     }
-
-    // get first child
-    GtkTreePath *child_path = gtk_tree_path_copy (path);
-    gtk_tree_path_append_index (child_path, 0);
-    gtk_tree_model_get_iter (model, &iter, child_path);
-    gtk_tree_path_free (child_path);
-    child_path = NULL;
 
     GValue value = { 0 };
     gtk_tree_model_get_value (model, &iter, COL_TRACK, &value);
@@ -846,7 +876,7 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
 
     if (track == NULL || mlv->artwork_source_id == 0) {
         gtk_tree_path_free (path);
-        return mlv->folder_icon;
+        return is_folder ? mlv->folder_icon : NULL;
     }
 
     // The path is owned by the completion block, and is freed by it, or by _receive_cover.
@@ -869,7 +899,7 @@ _pixbuf_cell_did_become_visible (void *ctx, const char *pathstr) {
         _receive_cover (mlv, path, cached_cover);
         g_object_unref (cached_cover);
     }
-    return mlv->folder_icon;
+    return is_folder ? mlv->folder_icon : NULL;
 }
 
 static void
@@ -885,7 +915,7 @@ _setup_columns (w_medialib_viewer_t *mlv) {
     mlv->column = col;
     gtk_tree_view_append_column (mlv->tree, col);
     gtk_tree_view_column_set_sizing (col, GTK_TREE_VIEW_COLUMN_AUTOSIZE);
-    if (mlv->show_album_art) {
+    if (mlv->art_mode != MEDIALIB_ART_NONE) {
         GtkCellRenderer *rend_pixbuf = GTK_CELL_RENDERER (ml_cell_renderer_pixbuf_new (&mlv->pixbuf_cell_delegate));
         gtk_tree_view_column_pack_start (col, rend_pixbuf, FALSE);
         gtk_tree_view_column_add_attribute (col, rend_pixbuf, "path", COL_PATH);
@@ -906,7 +936,7 @@ w_medialib_viewer_create (void) {
     w->base.destroy = w_medialib_viewer_destroy;
     w->base.message = w_medialib_viewer_message;
 
-    w->show_album_art = deadbeef->conf_get_int ("gtkui.show_medialib_covers", 1);
+    w->art_mode = deadbeef->conf_get_int ("gtkui.show_medialib_covers", MEDIALIB_ART_FOLDERS);
 
     gtk_widget_set_can_focus (w->base.widget, FALSE);
 
