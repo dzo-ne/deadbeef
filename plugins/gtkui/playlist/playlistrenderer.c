@@ -51,6 +51,8 @@ typedef struct {
 // LRU cache of scaled row thumbnails: the hash maps a key to its link in the queue, most recent first.
 static GHashTable *playlist_thumb_index;
 static GQueue playlist_thumb_lru = G_QUEUE_INIT;
+// Incremented when the cache is cleared, so that the covers requested before that are not cached
+static int playlist_thumb_generation;
 
 static gboolean
 _playlist_thumb_is_image (GdkPixbuf *thumb) {
@@ -110,6 +112,7 @@ _playlist_thumb_cache_put (const char *key, GdkPixbuf *thumb) {
 
 void
 pl_common_clear_thumb_cache (void) {
+    playlist_thumb_generation++;
     if (playlist_thumb_index != NULL) {
         g_hash_table_remove_all (playlist_thumb_index);
     }
@@ -235,11 +238,16 @@ pl_common_draw_column_data (DdbListview *listview, cairo_t *cr, DdbListviewIter 
                 GtkWidget **listview_ref = g_new (GtkWidget *, 1);
                 *listview_ref = GTK_WIDGET (listview);
                 g_object_add_weak_pointer (G_OBJECT (listview), (gpointer *)listview_ref);
+                int generation = playlist_thumb_generation;
 
                 GdkPixbuf *image = covermanager_cover_for_track_no_default (covermanager_shared (), track, 0, ^(GdkPixbuf *img) {
                     deadbeef->pl_item_unref (track);
-                    GdkPixbuf *scaled = img != NULL ? _playlist_scale_thumb (img, avail_w, avail_h) : NULL;
-                    _playlist_thumb_cache_put (saved_key, scaled ? scaled : SENTINEL_NO_ART);
+                    GdkPixbuf *scaled = NULL;
+                    // skip the cover if the cache was cleared while it was loading
+                    if (generation == playlist_thumb_generation) {
+                        scaled = img != NULL ? _playlist_scale_thumb (img, avail_w, avail_h) : NULL;
+                        _playlist_thumb_cache_put (saved_key, scaled ? scaled : SENTINEL_NO_ART);
+                    }
                     free (saved_key);
 
                     if (*listview_ref != NULL) {
